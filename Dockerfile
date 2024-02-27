@@ -1,7 +1,7 @@
 # build
-FROM golang:1.17.2-alpine3.14 AS build
+FROM registry.fedoraproject.org/fedora:latest AS build
 WORKDIR /app
-RUN apk --no-cache add -t build-deps build-base make git curl ca-certificates
+RUN dnf -y install go make
 
 COPY go.mod go.sum ./
 RUN go mod download
@@ -9,8 +9,8 @@ RUN go mod download
 COPY . .
 RUN make build
 
+
 # runtime
-FROM alpine:3.14
-RUN apk --no-cache add ca-certificates
-COPY --from=build /app/bin/unifi-detector /usr/local/bin/unifi-detector
-CMD ["unifi-detector"]
+FROM registry.fedoraproject.org/fedora:latest
+COPY --from=build /app/bin/unifi-detector /unifi-detector
+CMD ["/unifi-detector"]

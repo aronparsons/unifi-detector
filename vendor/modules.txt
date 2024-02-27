@@ -1,0 +1,32 @@
+# github.com/eclipse/paho.mqtt.golang v1.4.3
+## explicit; go 1.18
+github.com/eclipse/paho.mqtt.golang
+github.com/eclipse/paho.mqtt.golang/packets
+# github.com/gorilla/websocket v1.5.1
+## explicit; go 1.20
+github.com/gorilla/websocket
+# github.com/mdlayher/unifi v0.0.0-20180604180305-be73af8d7922
+## explicit
+github.com/mdlayher/unifi
+# github.com/muesli/cache2go v0.0.0-20221011235721-518229cd8021
+## explicit; go 1.15
+github.com/muesli/cache2go
+# github.com/namsral/flag v1.7.4-pre
+## explicit
+github.com/namsral/flag
+# github.com/sirupsen/logrus v1.9.3
+## explicit; go 1.13
+github.com/sirupsen/logrus
+# github.com/stretchr/testify v1.8.4
+## explicit; go 1.20
+# golang.org/x/net v0.21.0
+## explicit; go 1.18
+golang.org/x/net/internal/socks
+golang.org/x/net/proxy
+# golang.org/x/sync v0.6.0
+## explicit; go 1.18
+golang.org/x/sync/semaphore
+# golang.org/x/sys v0.17.0
+## explicit; go 1.18
+golang.org/x/sys/unix
+golang.org/x/sys/windows

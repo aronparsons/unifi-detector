@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
@@ -40,6 +41,10 @@ type mqttConfig struct {
 	qos      byte
 	retain   bool
 	client   *mqtt.Client
+}
+
+type ntfyConfig struct {
+	topic string
 }
 
 type mqttHeartbeatMsg struct {
@@ -79,14 +84,14 @@ func newClient(config *unifiConfig) (*unifi.Client, error) {
 	return client, err
 }
 
-func pollClients(config *appConfig, unifiClient *unifi.Client, mqtt *mqttConfig, cache *cache2go.CacheTable) {
+func pollClients(config *appConfig, unifiClient *unifi.Client, mqtt *mqttConfig, ntfy *ntfyConfig, cache *cache2go.CacheTable) {
 	for range time.Tick(config.scanInterval) {
-		go evaluateClients(config, unifiClient, cache, mqtt, false)
+		go evaluateClients(config, unifiClient, cache, mqtt, ntfy, false)
 	}
 }
 
-func initializeClientsCache(config *appConfig, unifiClient *unifi.Client, mqtt *mqttConfig, cache *cache2go.CacheTable) {
-	evaluateClients(config, unifiClient, cache, mqtt, true)
+func initializeClientsCache(config *appConfig, unifiClient *unifi.Client, mqtt *mqttConfig, ntfy *ntfyConfig, cache *cache2go.CacheTable) {
+	evaluateClients(config, unifiClient, cache, mqtt, ntfy, true)
 }
 
 func notifyOfClient(client *unifi.Station, mqtt *mqttConfig) {
@@ -107,7 +112,22 @@ func notifyOfClient(client *unifi.Station, mqtt *mqttConfig) {
 	log.Debugf("notified mqtt of client %v", client.MAC.String())
 }
 
-func evaluateClients(config *appConfig, unifiClient *unifi.Client, cache *cache2go.CacheTable, mqtt *mqttConfig, firstRun bool) {
+func notifyOfClientNtfy(client *unifi.Station, ntfy *ntfyConfig) {
+	clientMsg := &mqttClientMsg{
+		FirstSeen: client.FirstSeen,
+		LastSeen:  client.LastSeen,
+		Hostname:  client.Hostname,
+		MAC:       client.MAC.String(),
+		IP:        client.IP,
+	}
+
+	msg := fmt.Sprintf("new client: %+v", clientMsg)
+
+	http.Post(fmt.Sprintf("https://ntfy.sh/%s", ntfy.topic), "text/plain", strings.NewReader(msg))
+	log.Debugf("notified ntfy of client %v", client.MAC.String())
+}
+
+func evaluateClients(config *appConfig, unifiClient *unifi.Client, cache *cache2go.CacheTable, mqtt *mqttConfig, ntfy *ntfyConfig, firstRun bool) {
 	clients, err := unifiClient.Stations("default")
 	if err != nil {
 		log.Errorf("failed to fetch clients: %v\n", err)
@@ -125,8 +145,10 @@ func evaluateClients(config *appConfig, unifiClient *unifi.Client, cache *cache2
 		return
 	}
 
-	(*mqtt.client).Publish(mqtt.topic, mqtt.qos, mqtt.retain, string(msg))
-	log.Info("issued heartbeat")
+	if mqtt.client != nil {
+		(*mqtt.client).Publish(mqtt.topic, mqtt.qos, mqtt.retain, string(msg))
+		log.Info("issued heartbeat")
+	}
 
 	// Evaluate clients
 	for _, c := range clients {
@@ -141,7 +163,13 @@ func evaluateClients(config *appConfig, unifiClient *unifi.Client, cache *cache2
 			}).Info("new client discovered")
 
 			if timeSinceLastSeen <= config.clientLifespan {
-				go notifyOfClient(c, mqtt)
+				if mqtt.client != nil {
+					go notifyOfClient(c, mqtt)
+				}
+
+				if ntfy.topic != "" {
+					go notifyOfClientNtfy(c, ntfy)
+				}
 			}
 		}
 
@@ -172,6 +200,7 @@ func main() {
 		clientConfig   unifiConfig
 		mqttConfig     mqttConfig
 		mqttQos        int
+		ntfyConfig     ntfyConfig
 		printVersion   bool
 	)
 
@@ -191,6 +220,8 @@ func main() {
 	fs.StringVar(&mqttConfig.topic, "mqtt-topic", "", "MQTT broker topic")
 	fs.IntVar(&mqttQos, "mqtt-qos", 0, "MQTT QoS for messages sent")
 	fs.BoolVar(&mqttConfig.retain, "mqtt-retain", true, "Retain MQTT messages on broker")
+
+	fs.StringVar(&ntfyConfig.topic, "ntfy-topic", "", "ntfy topic")
 
 	fs.BoolVar(&printVersion, "version", false, "displays version information")
 
@@ -216,11 +247,11 @@ func main() {
 		log.Fatal("hostname for Unifi Controller must be set")
 	}
 
-	if mqttConfig.address == "" {
-		log.Fatal("hostname for MQTT broker must be set")
+	if mqttConfig.address == "" && ntfyConfig.topic == "" {
+		log.Fatal("mqtt or ntfy must be enabled")
 	}
 
-	if mqttConfig.topic == "" {
+	if mqttConfig.address != "" && mqttConfig.topic == "" {
 		log.Fatal("topic for MQTT broker must be set")
 	}
 
@@ -244,25 +275,27 @@ func main() {
 	}
 
 	// initialize mqtt connection
-	mqttOpts := mqtt.NewClientOptions().AddBroker(mqttConfig.address).SetClientID(programName)
-	mqttOpts.SetAutoReconnect(true)
-	mqttOpts.SetKeepAlive(2 * time.Second)
-	mqttOpts.SetPingTimeout(1 * time.Second)
-	mqttOpts.SetUsername(mqttConfig.username)
-	mqttOpts.SetPassword(mqttConfig.password)
+	if mqttConfig.address != "" {
+		mqttOpts := mqtt.NewClientOptions().AddBroker(mqttConfig.address).SetClientID(programName)
+		mqttOpts.SetAutoReconnect(true)
+		mqttOpts.SetKeepAlive(2 * time.Second)
+		mqttOpts.SetPingTimeout(1 * time.Second)
+		mqttOpts.SetUsername(mqttConfig.username)
+		mqttOpts.SetPassword(mqttConfig.password)
 
-	mqttClient := mqtt.NewClient(mqttOpts)
-	if token := mqttClient.Connect(); token.Wait() && token.Error() != nil {
-		log.Fatalf("failed to connect to MQTT: %v", token.Error())
-		os.Exit(1)
-	} else {
-		log.Infof("successfully to MQTT broker at %v", mqttConfig.address)
+		mqttClient := mqtt.NewClient(mqttOpts)
+		if token := mqttClient.Connect(); token.Wait() && token.Error() != nil {
+			log.Fatalf("failed to connect to MQTT: %v", token.Error())
+			os.Exit(1)
+		} else {
+			log.Infof("successfully to MQTT broker at %v", mqttConfig.address)
+		}
+		mqttConfig.client = &mqttClient
 	}
-	mqttConfig.client = &mqttClient
 
 	// fetch initial list of clients
-	initializeClientsCache(&config, client, &mqttConfig, cache)
+	initializeClientsCache(&config, client, &mqttConfig, &ntfyConfig, cache)
 
 	// start polling for clients
-	pollClients(&config, client, &mqttConfig, cache)
+	pollClients(&config, client, &mqttConfig, &ntfyConfig, cache)
 }
