@@ -13,6 +13,7 @@ import (
 	"github.com/mdlayher/unifi"
 	"github.com/muesli/cache2go"
 	flag "github.com/namsral/flag"
+	"github.com/sirupsen/logrus"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -91,7 +92,16 @@ func pollClients(config *appConfig, unifiClient *unifi.Client, mqtt *mqttConfig,
 }
 
 func initializeClientsCache(config *appConfig, unifiClient *unifi.Client, mqtt *mqttConfig, ntfy *ntfyConfig, cache *cache2go.CacheTable) {
-	evaluateClients(config, unifiClient, cache, mqtt, ntfy, true)
+	for {
+		err := evaluateClients(config, unifiClient, cache, mqtt, ntfy, true)
+
+		if err != nil {
+			log.Errorf("failed to initialize client cache")
+			time.Sleep(5 * time.Second)
+		} else {
+			break
+		}
+	}
 }
 
 func notifyOfClient(client *unifi.Station, mqtt *mqttConfig) {
@@ -123,15 +133,21 @@ func notifyOfClientNtfy(client *unifi.Station, ntfy *ntfyConfig) {
 
 	msg := fmt.Sprintf("new client: %+v", clientMsg)
 
-	http.Post(fmt.Sprintf("https://ntfy.sh/%s", ntfy.topic), "text/plain", strings.NewReader(msg))
-	log.Debugf("notified ntfy of client %v", client.MAC.String())
+	log.Infof("notifying ntfy topic %s of client %v", ntfy.topic, client.MAC.String())
+
+	httpClient := &http.Client{}
+	_, err := httpClient.Post(fmt.Sprintf("https://ntfy.sh/%s", ntfy.topic), "text/plain", strings.NewReader(msg))
+
+	if err != nil {
+		log.Errorf("error making http request: %s\n", err)
+	}
 }
 
-func evaluateClients(config *appConfig, unifiClient *unifi.Client, cache *cache2go.CacheTable, mqtt *mqttConfig, ntfy *ntfyConfig, firstRun bool) {
+func evaluateClients(config *appConfig, unifiClient *unifi.Client, cache *cache2go.CacheTable, mqtt *mqttConfig, ntfy *ntfyConfig, firstRun bool) error {
 	clients, err := unifiClient.Stations("default")
 	if err != nil {
 		log.Errorf("failed to fetch clients: %v\n", err)
-		return
+		return err
 	}
 
 	heartbeatMsg := &mqttHeartbeatMsg{
@@ -142,7 +158,7 @@ func evaluateClients(config *appConfig, unifiClient *unifi.Client, cache *cache2
 	msg, err := json.Marshal(heartbeatMsg)
 	if err != nil {
 		log.Errorf("failed to generate heartbeat: %v\n", err)
-		return
+		return err
 	}
 
 	if mqtt.client != nil {
@@ -152,7 +168,7 @@ func evaluateClients(config *appConfig, unifiClient *unifi.Client, cache *cache2
 
 	// Evaluate clients
 	for _, c := range clients {
-		timeSinceLastSeen := time.Now().Sub(c.LastSeen)
+		timeSinceLastSeen := time.Now().UTC().Sub(c.LastSeen)
 		cachedClient, err := cache.Value(c.MAC.String())
 
 		if err != nil && !firstRun {
@@ -189,6 +205,8 @@ func evaluateClients(config *appConfig, unifiClient *unifi.Client, cache *cache2
 			}
 		}
 	}
+
+	return nil
 }
 
 func main() {
@@ -202,10 +220,11 @@ func main() {
 		mqttQos        int
 		ntfyConfig     ntfyConfig
 		printVersion   bool
+		debug          bool
 	)
 
 	fs := flag.NewFlagSetWithEnvPrefix(os.Args[0], "UNIFI", 0)
-	fs.IntVar(&configLifespan, "lifespan", 3600, "Client cache lifespan in seconds")
+	fs.IntVar(&configLifespan, "lifespan", 86400, "Client cache lifespan in seconds")
 	fs.IntVar(&configInterval, "interval", 60, "Scan interval in seconds")
 
 	fs.StringVar(&clientConfig.address, "api-address", "", "Unifi Controller address")
@@ -224,6 +243,7 @@ func main() {
 	fs.StringVar(&ntfyConfig.topic, "ntfy-topic", "", "ntfy topic")
 
 	fs.BoolVar(&printVersion, "version", false, "displays version information")
+	fs.BoolVar(&debug, "debug", false, "print debug logs")
 
 	e := fs.Parse(os.Args[1:])
 
@@ -237,6 +257,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	if debug {
+		logrus.SetLevel(logrus.DebugLevel)
+	}
+
 	versionString := fmt.Sprintf("%v version:%s", programName, programVersion)
 	if printVersion {
 		fmt.Println(versionString)
@@ -248,7 +272,7 @@ func main() {
 	}
 
 	if mqttConfig.address == "" && ntfyConfig.topic == "" {
-		log.Fatal("mqtt or ntfy must be enabled")
+		log.Warningf("mqtt or ntfy should be enabled")
 	}
 
 	if mqttConfig.address != "" && mqttConfig.topic == "" {
