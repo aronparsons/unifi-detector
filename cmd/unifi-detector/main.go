@@ -57,6 +57,7 @@ type mqttHeartbeatMsg struct {
 type mqttClientMsg struct {
 	FirstSeen time.Time `json:"first_seen"`
 	LastSeen  time.Time `json:"last_seen"`
+	Name      string    `json:"name"`
 	Hostname  string    `json:"hostname"`
 	MAC       string    `json:"mac"`
 	IP        net.IP    `json:"ip"`
@@ -108,6 +109,7 @@ func notifyOfClient(client *unifi.Station, mqtt *mqttConfig) {
 	clientMsg := &mqttClientMsg{
 		FirstSeen: client.FirstSeen,
 		LastSeen:  client.LastSeen,
+		Name:      client.Name,
 		Hostname:  client.Hostname,
 		MAC:       client.MAC.String(),
 		IP:        client.IP,
@@ -126,6 +128,7 @@ func notifyOfClientNtfy(client *unifi.Station, ntfy *ntfyConfig) {
 	clientMsg := &mqttClientMsg{
 		FirstSeen: client.FirstSeen,
 		LastSeen:  client.LastSeen,
+		Name:      client.Name,
 		Hostname:  client.Hostname,
 		MAC:       client.MAC.String(),
 		IP:        client.IP,
@@ -146,7 +149,7 @@ func notifyOfClientNtfy(client *unifi.Station, ntfy *ntfyConfig) {
 func evaluateClients(config *appConfig, unifiClient *unifi.Client, cache *cache2go.CacheTable, mqtt *mqttConfig, ntfy *ntfyConfig, firstRun bool) error {
 	clients, err := unifiClient.Stations("default")
 	if err != nil {
-		log.Errorf("failed to fetch clients: %v\n", err)
+		log.Fatalf("failed to fetch clients: %v\n", err)
 		return err
 	}
 
@@ -168,24 +171,37 @@ func evaluateClients(config *appConfig, unifiClient *unifi.Client, cache *cache2
 
 	// Evaluate clients
 	for _, c := range clients {
+		timeSinceFirstSeen := time.Now().UTC().Sub(c.FirstSeen)
 		timeSinceLastSeen := time.Now().UTC().Sub(c.LastSeen)
 		cachedClient, err := cache.Value(c.MAC.String())
 
+		var verb string
+		if timeSinceFirstSeen >= config.clientLifespan {
+			verb = "existing"
+		} else {
+			verb = "new"
+		}
+
 		if err != nil && !firstRun {
 			log.WithFields(log.Fields{
-				"mac":      c.MAC.String(),
-				"hostname": c.Hostname,
-				"ip":       c.IP.String(),
-			}).Info("new client discovered")
+				"name":      c.Name,
+				"mac":       c.MAC.String(),
+				"hostname":  c.Hostname,
+				"ip":        c.IP.String(),
+				"firstSeen": c.FirstSeen,
+			}).Infof("%s client discovered", verb)
 
-			if timeSinceLastSeen <= config.clientLifespan {
-				if mqtt.client != nil {
-					go notifyOfClient(c, mqtt)
-				}
+			if timeSinceFirstSeen >= config.clientLifespan {
+				cache.Add(c.MAC.String(), config.clientLifespan, c)
+				continue
+			}
 
-				if ntfy.topic != "" {
-					go notifyOfClientNtfy(c, ntfy)
-				}
+			if mqtt.client != nil {
+				go notifyOfClient(c, mqtt)
+			}
+
+			if ntfy.topic != "" {
+				go notifyOfClientNtfy(c, ntfy)
 			}
 		}
 
@@ -193,6 +209,7 @@ func evaluateClients(config *appConfig, unifiClient *unifi.Client, cache *cache2
 			cache.Add(c.MAC.String(), config.clientLifespan, c)
 		} else {
 			log.WithFields(log.Fields{
+				"name":              c.Name,
 				"mac":               c.MAC.String(),
 				"hostname":          c.Hostname,
 				"ip":                c.IP.String(),
@@ -290,12 +307,18 @@ func main() {
 	cache := newCache("unifi_clients")
 
 	// initialize unifi client
-	client, err := newClient(&clientConfig)
-	if err != nil {
-		log.Fatalf("failed to connect to UniFi: %v", err)
-		os.Exit(1)
-	} else {
-		log.Infof("successfully connected to UniFi at %v", clientConfig.address)
+	var client *unifi.Client
+	var err error
+	for {
+		client, err = newClient(&clientConfig)
+		if err != nil {
+			log.Errorf("failed to connect to UniFi: %v", err)
+			client = nil
+			time.Sleep(5 * time.Second)
+		} else {
+			log.Infof("successfully connected to UniFi at %v", clientConfig.address)
+			break
+		}
 	}
 
 	// initialize mqtt connection
